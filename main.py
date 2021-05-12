@@ -31,6 +31,8 @@ class BaseChannel(ABC):
     def __init__(self, params, graph):
         self.params = params
         self.graph = graph
+        self.list_edges = np.array(graph.edges)
+
         super().__init__()
 
     @abstractmethod
@@ -48,29 +50,34 @@ class BaseChannel(ABC):
     def encode(self, x_in):
         x_in = np.array(x_in)
 
-        list_edges = list(self.graph.edges())
+        n_edges = len(self.list_edges)
 
-        y = np.zeros(len(list_edges))
-        for i, edge in enumerate(list_edges):
+        y = np.zeros(n_edges+len(x_in))
+        for i, edge in enumerate(self.list_edges):
             y[i] = x_in[edge[0]] * x_in[edge[1]]
+        y[n_edges:] = x_in
 
         return y
 
     def decode(self, y_out, T=0):
-        Q = defaultdict(int)
-        list_edges = np.array(list(self.graph.edges))
+        J = defaultdict(int)
+        self.list_edges = np.array(list(self.graph.edges))
+        n_edges = len(self.list_edges)
 
-        # Fill in Q matrix
-        for u, v in self.graph.edges:
-            i_edge = np.where(list_edges == (u,v))[0][0]
-            Q[(u,v)] += 0.5 * np.log(self.conditional_density(y_out[i_edge], 1) / self.conditional_density(y_out[i_edge], -1))
-            
+        for i_edge, (u, v) in enumerate(self.graph.edges):
+            # Q[(u,v)] -= 0.5 * np.log(self.conditional_density(y_out[i_edge], 1) / self.conditional_density(y_out[i_edge], -1))
+            J[(u,v)] -= y_out[i_edge]
+
+        h = -y_out[n_edges:]
 
         sampler = ExactSolver()
-        x_dec = np.array(list(sampler.sample_qubo(Q).first.sample.values()))
-        x_dec = 1-2*x_dec
-
+        x_dec = np.array(list(sampler.sample_ising(h, J).first.sample.values()))
+        
         return x_dec
+
+    def get_ber(self, x_in, x_dec):
+        N = len(x_in)
+        return np.sum(np.abs(x_in - x_dec)) / (2*N)
 
 
 class BinarySymmetricChannel(BaseChannel):
@@ -81,7 +88,7 @@ class BinarySymmetricChannel(BaseChannel):
 
     def send(self, y_in):
         errors = np.random.binomial(1, self.params['p_error'], size=y_in.shape)
-        print("errors", errors)
+        # print("errors", errors)
         return (y_in*(1-2*errors))
 
     def get_nishimori_temperature(self):
@@ -96,18 +103,28 @@ class BinarySymmetricChannel(BaseChannel):
 
 
 if __name__ == "__main__":
-    p_error = 0.2
+    n_p = 40
+    n_reps = 100
     graph = dnx.chimera_graph(1)
-    channel = BinarySymmetricChannel(p_error, graph)
+    x_in = np.array(np.ones(len(graph.nodes)))
 
-    # x_in = [1 for _ in range(8)]
-    x_in = [-1,1,-1,1,-1,1,-1,1]
-    print("x_in", x_in)
-    y_in = channel.encode(x_in)
-    print("y_in", y_in)
-    y_out = channel.send(y_in)
-    print("y_out", y_out)
-    y_dec = channel.decode(y_out)
-    print("y_dec", y_dec)
+    ber = np.zeros((n_p, n_reps))
+    list_p = np.linspace(0.01, 0.499, n_p)
+    for i_p, p_error in enumerate(list_p):
+        print("================= p_error", p_error)
+        channel = BinarySymmetricChannel(p_error, graph)
+
+        for i_rep in range(n_reps):
+            y_in = channel.encode(x_in)
+            # print("y_in", y_in)
+            y_out = channel.send(y_in)
+            # print("y_out", y_out)
+            x_dec = channel.decode(y_out)
+            # print("x_dec", x_dec)
+            ber[i_p, i_rep] = channel.get_ber(x_in, x_dec)
+            # print(ber[i_p, i_rep])
     
-
+    plt.xlabel("Crossover probability")
+    plt.ylabel("BER (T=0)")
+    plt.plot(list_p, np.mean(ber, axis=1))
+    plt.show()
