@@ -15,28 +15,24 @@ from collections import defaultdict
 from dimod.reference.samplers import ExactSolver
 
 
-# def get_ground_state(hamiltonian):
-#     braket_sampler = BraketDWaveSampler(s3,'arn:aws:braket:::device/qpu/d-wave/Advantage_system1')
-#     sampler = EmbeddingComposite(braket_sampler)
-
-#     chainstrength = 8
-#     numruns = 10
-
-#     response = sampler.sample_qubo(Q, chain_strength=chainstrength, num_reads=numruns)
-#     energies = iter(response.data())
-
-
-
 class BaseChannel(ABC):
-    def __init__(self, params, graph):
+    def __init__(self, params, token_file="dwave-token.txt"):
         self.params = params
-        self.graph = graph
-        self.list_edges = np.array(graph.edges)
+        # self.graph = graph
+        # self.list_edges = np.array(graph.edges)
+
+        with open(token_file) as f:
+            token = str(f.read()).rstrip()
+        self.sampler = DWaveSampler({'topology__type': 'chimera'}, token=token)
+        self.list_edges = np.array(self.sampler.edgelist)
+        self.list_nodes = np.array(self.sampler.nodelist)
+
+        # self.sampler = ExactSolver()
 
         super().__init__()
 
     @abstractmethod
-    def send(self, x_in):
+    def send(self, J_in, h_in):
         pass
 
     @abstractmethod
@@ -48,30 +44,17 @@ class BaseChannel(ABC):
         pass
 
     def encode(self, x_in):
-        x_in = np.array(x_in)
+        x_dict = {node: x_in[i] for i, node in enumerate(self.list_nodes)}
 
-        n_edges = len(self.list_edges)
-
-        y = np.zeros(n_edges+len(x_in))
-        for i, edge in enumerate(self.list_edges):
-            y[i] = x_in[edge[0]] * x_in[edge[1]]
-        y[n_edges:] = x_in
-
-        return y
-
-    def decode(self, y_out, T=0):
         J = defaultdict(int)
-        self.list_edges = np.array(list(self.graph.edges))
-        n_edges = len(self.list_edges)
+        for (u,v) in self.list_edges:
+            J[(u,v)] = - x_dict[u] * x_dict[v]
+        h = {node: -x_dict[node] for node in x_dict.keys()}
 
-        for i_edge, (u, v) in enumerate(self.graph.edges):
-            # Q[(u,v)] -= 0.5 * np.log(self.conditional_density(y_out[i_edge], 1) / self.conditional_density(y_out[i_edge], -1))
-            J[(u,v)] -= y_out[i_edge]
+        return J, h
 
-        h = -y_out[n_edges:]
-
-        sampler = ExactSolver()
-        x_dec = np.array(list(sampler.sample_ising(h, J).first.sample.values()))
+    def decode(self, J_out, h_out, T=0):
+        x_dec = np.array(list(self.sampler.sample_ising(h_out, J_out).first.sample.values()))
         
         return x_dec
 
@@ -81,15 +64,17 @@ class BaseChannel(ABC):
 
 
 class BinarySymmetricChannel(BaseChannel):
-    def __init__(self, p_error, graph):
+    def __init__(self, p_error):
         params = {"p_error": p_error}
 
-        super().__init__(params, graph)
+        super().__init__(params)
 
-    def send(self, y_in):
-        errors = np.random.binomial(1, self.params['p_error'], size=y_in.shape)
-        # print("errors", errors)
-        return (y_in*(1-2*errors))
+    def send(self, J_in, h_in):
+        p = self.params['p_error']
+        J_out = {edge: J_in[edge] * np.random.choice([-1, 1], p=[p, 1-p]) for edge in J_in.keys()}
+        h_out = {edge: h_in[edge] * np.random.choice([-1, 1], p=[p, 1-p]) for edge in h_in.keys()}
+        
+        return J_out, h_out
 
     def get_nishimori_temperature(self):
         p = self.params['p_error']
@@ -103,28 +88,29 @@ class BinarySymmetricChannel(BaseChannel):
 
 
 if __name__ == "__main__":
-    n_p = 40
-    n_reps = 100
-    graph = dnx.chimera_graph(1)
-    x_in = np.array(np.ones(len(graph.nodes)))
+    n_p = 10
+    n_reps = 10
 
-    ber = np.zeros((n_p, n_reps))
-    list_p = np.linspace(0.01, 0.499, n_p)
-    for i_p, p_error in enumerate(list_p):
-        print("================= p_error", p_error)
-        channel = BinarySymmetricChannel(p_error, graph)
+    channel = BinarySymmetricChannel(0.001)
+    x_in = np.array(np.ones(len(channel.list_nodes)))
 
-        for i_rep in range(n_reps):
-            y_in = channel.encode(x_in)
-            # print("y_in", y_in)
-            y_out = channel.send(y_in)
-            # print("y_out", y_out)
-            x_dec = channel.decode(y_out)
-            # print("x_dec", x_dec)
-            ber[i_p, i_rep] = channel.get_ber(x_in, x_dec)
-            # print(ber[i_p, i_rep])
+    # ber = np.zeros((n_p, n_reps))
+    # list_p = np.linspace(0.01, 0.499, n_p)
+    # for i_p, p_error in enumerate(list_p):
+    #     print(f"================= p: {p_error} ==================")
+    #     channel = BinarySymmetricChannel(p_error)
+
+    #     for i_rep in range(n_reps):
+    #         J_in, h_in = channel.encode(x_in)
+    #         # print("y_in", y_in)
+    #         J_out, h_out = channel.send(J_in, h_in)
+    #         # print("y_out", y_out)
+    #         x_dec = channel.decode(J_out, h_out)
+    #         print("x_dec", x_dec)
+    #         ber[i_p, i_rep] = channel.get_ber(x_in, list(x_dec))
+    #         print(ber[i_p, i_rep])
     
-    plt.xlabel("Crossover probability")
-    plt.ylabel("BER (T=0)")
-    plt.plot(list_p, np.mean(ber, axis=1))
-    plt.show()
+    # plt.xlabel("Crossover probability")
+    # plt.ylabel("BER (T=0)")
+    # plt.plot(list_p, np.mean(ber, axis=1))
+    # plt.show()
